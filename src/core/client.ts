@@ -5,8 +5,8 @@ import { confirmMutation, type ShownChange } from "./confirm.js";
 import { asCliError, CliError, stepsFailure, type ErrorCode, type StepPartial } from "./errors.js";
 import { buildPlan, decodeRaw, displayUrl, guardHook, performRequest, scrubDeep, type Exchange, type RequestPlan } from "./http.js";
 import { announceProfile, printRaw, printResult } from "./output.js";
-import { traverse } from "./pagination.js";
-import type { HookHelpers, RequestSpec, ResponseShape } from "./provider.js";
+import { traverse, type Traversal } from "./pagination.js";
+import type { HookHelpers, Pagination, RequestSpec, ResponseShape } from "./provider.js";
 import type { Context } from "./registry.js";
 import { hookHelpers, rejectBodyFailure, shapeResponse, unwrap, type ShapeCall, type Shaped } from "./shape.js";
 import type { HttpMethod } from "./types.js";
@@ -59,6 +59,14 @@ export interface MutationPlan {
   changes?: Change[];
   /** What --dry-run validated. "local and remote read" when the plan came from reading the target. Default: "local". */
   validation?: "local" | "local and remote read";
+}
+
+/** Independent items confirmed together. Each item's steps stop on failure; later items still run. */
+export interface MutationBatch extends Omit<MutationPlan, "steps"> {
+  items: ({ name: string } & (
+    | { error: CliError; steps?: never; result?: never }
+    | { steps: Step[]; result(results: Shaped[]): unknown; error?: never }
+  ))[];
 }
 
 /**
@@ -123,15 +131,16 @@ export class Client {
   }
 
   /** Reads a collection with the --page-size, --cursor, --all, and --max-items options of the command. */
-  async paginate(call: Call): Promise<Shaped> {
+  async paginate(call: Call, traversal?: Traversal & { style: Pagination }): Promise<Shaped> {
     if (call.mutation) throw new CliError("UNEXPECTED_ERROR", `${this.name()} paginates a mutation.`);
+    if (traversal) return traverse(this.plan(call, true), this.shapeCall(call), traversal.style, traversal, this.context);
     const spec = this.context.spec.pagination;
     const style = spec?.style ?? this.tool.provider.pagination;
     if (!spec || !style) {
       throw new CliError("UNEXPECTED_ERROR", `${this.name()} paginates without a pagination spec and style.`);
     }
     const { options } = this.context;
-    const traversal = {
+    const configured = {
       pageSize: options.number("page-size") ?? spec.default,
       all: options.flag("all"),
       maxItems: options.number("max-items"),
@@ -141,7 +150,7 @@ export class Client {
       min: spec.min,
       max: spec.max,
     };
-    return traverse(this.plan(call, true), this.shapeCall(call), style, traversal, this.context);
+    return traverse(this.plan(call, true), this.shapeCall(call), style, configured, this.context);
   }
 
   /**
@@ -152,6 +161,51 @@ export class Client {
    * Returns the shaped response of every step.
    */
   async mutate(plan: MutationPlan): Promise<Shaped[] | undefined> {
+    const plans = await this.authorizeMutation(plan);
+    return plans ? this.sendSteps(plan.steps, plans) : undefined;
+  }
+
+  /** Confirms once, runs independent items in order, and retains every result or error. */
+  async mutateBatch(batch: MutationBatch): Promise<unknown[] | undefined> {
+    const steps = batch.items.flatMap((item) => item.steps ?? []);
+    const plan: MutationPlan = { ...batch, steps };
+    const plans = await this.authorizeMutation(plan);
+    if (!plans) return undefined;
+    const partial: StepPartial = { completed: [], failed: [], not_attempted: [] };
+    let offset = 0;
+    let unknownOutcome = false;
+    for (const item of batch.items) {
+      const itemPlans = plans.slice(offset, offset + (item.steps?.length ?? 0));
+      offset += itemPlans.length;
+      try {
+        if (item.error) throw item.error;
+        const results = await this.sendSteps(item.steps, itemPlans);
+        const lastPlan = itemPlans.at(-1);
+        const result = lastPlan ? guardHook(lastPlan, () => item.result(results)) : item.result(results);
+        partial.completed.push({ step: item.name, result });
+      } catch (error) {
+        const failure = asCliError(error);
+        unknownOutcome ||= failure.extra.outcome === "unknown";
+        partial.failed.push({ step: item.name, error: {
+          code: failure.code,
+          message: failure.message,
+          ...(failure.extra.provider ? { provider: failure.extra.provider } : {}),
+          details: {
+            ...failure.extra.details,
+            ...(failure.extra.outcome ? { outcome: failure.extra.outcome } : {}),
+            ...(failure.extra.partial ? { partial: failure.extra.partial } : {}),
+          },
+        } });
+      }
+    }
+    if (partial.failed.length > 0) throw stepsFailure(partial, {
+      unit: "items",
+      ...(unknownOutcome ? { outcome: "unknown" } : {}),
+    });
+    return partial.completed.map((item) => item.result);
+  }
+
+  private async authorizeMutation(plan: MutationPlan): Promise<RequestPlan[] | undefined> {
     const { provider } = this.tool;
     const access = this.access();
     this.assertWritable();
@@ -172,7 +226,7 @@ export class Client {
       },
       { yes: this.context.options.flag("yes"), globals: this.context.globals, stdinCarriesContent: stdinCarriesContent(this.context) },
     );
-    return this.sendSteps(plan.steps, plans);
+    return plans;
   }
 
   /** Fails unless the profile may change provider state (Provider.accessLevels). mutate runs it; a run command that reads before it writes runs it first. */
@@ -218,6 +272,7 @@ export class Client {
         ...(call.body === undefined ? {} : { body: call.body }),
         mutation: call.mutation,
         raw: call.raw ?? false,
+        keepalive: call.keepalive,
         redirects: call.redirects,
         accept: call.accept,
         secretValues: call.secretValues ?? [],

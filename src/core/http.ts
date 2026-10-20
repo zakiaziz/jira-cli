@@ -15,7 +15,7 @@ export const MAX_CODE_LENGTH = 64;
 const MAX_REQUEST_ID_LENGTH = 128;
 
 /** What one request needs, before credentials and the endpoint are applied. */
-export interface PlanInput extends Pick<RequestSpec, "redirects" | "accept"> {
+export interface PlanInput extends Pick<RequestSpec, "redirects" | "accept" | "keepalive"> {
   method: HttpMethod;
   path: string;
   query: readonly (readonly [string, string])[];
@@ -45,6 +45,7 @@ export interface RequestPlan {
   safe: boolean;
   raw: boolean;
   redirects?: "same-origin";
+  keepalive?: false;
   urlContinuation?: true;
   timeoutMs: number;
   profile: string;
@@ -86,6 +87,7 @@ export function buildPlan(input: PlanInput, environment: PlanEnvironment): Reque
     ...(input.body === undefined ? {} : { body: input.body }),
     safe: !input.mutation,
     raw: input.raw,
+    ...(input.keepalive === false ? { keepalive: false as const } : {}),
     ...(input.redirects ? { redirects: input.redirects } : {}),
     timeoutMs: environment.timeoutMs,
     profile: access.profileName,
@@ -222,6 +224,7 @@ async function attemptOnce(plan: RequestPlan, inspect?: (exchange: Exchange) => 
       response = await fetch(url, {
         method: plan.method,
         redirect: plan.redirects ? "manual" : "error",
+        ...(plan.keepalive === false ? { keepalive: false } : {}),
         headers: plan.headers,
         ...(plan.body === undefined ? {} : { body: JSON.stringify(plan.body) }),
         signal,

@@ -314,6 +314,8 @@ export interface ResourceCommandBase {
   options: OptionSpec[];
   effects: Effects;
   output: string;
+  /** Optional human presentation. JSON and pretty output retain the original data. */
+  human?(data: unknown, context: Context): unknown;
   /** Credential set the command needs. Required when the provider declares credentialSets, otherwise not allowed. */
   credential?: string;
   /** Error codes beyond the shape-derived ones that the command can fail with, for the help Failures section. */
@@ -369,6 +371,8 @@ export interface LocalCommand {
 
 export interface RequestSpec {
   path: string;
+  /** Pass keepalive: false to fetch. Bun disables connection reuse, preventing its pooled-socket replay. Omitted preserves runtime defaults. */
+  keepalive?: false;
   /** Reads only: follow at most three redirects on the original origin, within the attempt's timeout. Default: reject redirects. */
   redirects?: "same-origin";
   /** Non-secret Accept header, also shown in previews. Default: application/json. */

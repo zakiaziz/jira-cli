@@ -58,8 +58,8 @@ export const provider: Provider = {
   api: {
     methods: HTTP_METHODS,
     examples: [
-      "jira api request GET /rest/api/3/issue/DEMO-1 --query fields=summary,status",
-      "jira api request PUT /rest/api/3/issue/DEMO-1 --file ./issue.json --dry-run",
+      "jira api request GET /rest/api/3/issue/ISSUE_KEY --query fields=summary,status",
+      "jira api request PUT /rest/api/3/issue/ISSUE_KEY --file ./issue.json --dry-run",
     ],
   },
   groups,

@@ -73,7 +73,7 @@ async function runCustom(tool: Tool, command: RunCommand, context: Context, prep
   const client = new Client(tool, context, command.credential);
   if (command.effects.kind === "remote-mutation") client.assertWritable();
   const result = await command.run(context, client, prepared);
-  if (result) printResult(result.data, client.meta(result.meta));
+  if (result) printResult(context.globals.format === "human" && command.human ? command.human(result.data, context) : result.data, client.meta(result.meta));
 }
 
 async function runRequest(tool: Tool, command: RequestCommand, context: Context, hasList: ListLookup, prepared: unknown): Promise<void> {
@@ -99,7 +99,7 @@ async function runRequest(tool: Tool, command: RequestCommand, context: Context,
       : await client.send(call);
   if (!shaped) return;
   if (command.emptyIsNotFound && isEmpty(shaped.data)) throw notFound(tool, command, context, hasList);
-  printResult(shaped.data, client.meta(shaped.meta));
+  printResult(context.globals.format === "human" && command.human ? command.human(shaped.data, context) : shaped.data, client.meta(shaped.meta));
 }
 
 async function mutate(client: Client, command: RequestCommand, call: Call, effect: string | undefined) {
