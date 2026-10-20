@@ -1,0 +1,386 @@
+// Vendored from cli-core. Do not edit here; change cli-core and run its sync script.
+import type { Endpoint } from "./access.js";
+import type { Client } from "./client.js";
+import type { ErrorCode, ProviderInfo } from "./errors.js";
+import type { ArgumentSpec, Context, CredentialOptionName, Effects, Exception, GroupSpec, OptionSpec, PaginationSpec } from "./registry.js";
+import type { HttpMethod } from "./types.js";
+
+/**
+ * Everything a tool supplies. The core derives every user-visible string from
+ * these fields, so a tool cannot change shared wording.
+ */
+export interface Provider {
+  /** Executable name. Names the config directory. */
+  bin: string;
+  /** Provider display name. */
+  name: string;
+  /**
+   * Credential profile fields. A secret field becomes --<key>-file PATH and a hidden prompt on setup and
+   * profiles create|update; a field with secret: false becomes --<key> VALUE and a plain prompt. A tool supports one
+   * authentication scheme, so the fields form one credential that every request sends.
+   */
+  secrets: SecretField[];
+  /**
+   * Groups the credential fields into sets that each command or check names, for a provider whose commands use
+   * different credentials, such as an account token for some commands and a server token for others. Not
+   * alternatives: a profile can store every set, and a command fails only when the set it names is absent. Default: one
+   * set that holds every field, which every request sends. A provider that declares sets needs at least two, and
+   * every command and check names its set.
+   */
+  credentialSets?: CredentialSet[];
+  /**
+   * Names the option that selects a credential set on api request and auth verify. Default: --credential CREDENTIAL,
+   * a noun of "credential". A provider whose sets are token types can name it --token-type. Only for a provider that
+   * declares credentialSets.
+   */
+  credentialOption?: CredentialOptionName;
+  /** How the credential travels, completing "Sends the selected profile credentials ... as <authScheme>". */
+  authScheme: string;
+  /** Request headers for the credential, keyed by field key. With credentialSets, a request passes only the fields of its set. */
+  authorize(credential: Readonly<Record<string, string>>): Record<string, string>;
+  /** Values derived from a credential that must be scrubbed from errors, such as an encoded token inside a header. */
+  secretValues?(credential: Readonly<Record<string, string>>): string[];
+  /** Static, non-secret request headers. They are sent, shown in previews, and never scrubbed. */
+  headers?: Readonly<Record<string, string>>;
+  /** Content-Type of JSON request bodies, such as "application/json; charset=utf-8". Default: application/json. */
+  jsonContentType?: string;
+  baseUrl: BaseUrlRule;
+  /**
+   * Non-secret settings stored per profile: endpoint selectors (API version, region, subdomain) and defaults for a
+   * target (default locale). Each becomes a profile key, --<key> on setup and profiles create|update, and
+   * --clear-<key> on profiles update.
+   */
+  endpointFields?: EndpointField[];
+  /** "graphql": every resource command and auth verify reads GraphQL responses. Default: "rest". Raw api request is never interpreted. */
+  protocol?: "rest" | "graphql";
+  /** GraphQL only: reads a failure from a mutation root that reports one in-band, such as { success: false, message }. */
+  rootFailure?(root: unknown): ProviderErrorDetail | undefined;
+  /** Response headers that carry the provider request ID. The first one present wins. */
+  requestIdHeader: string | readonly string[];
+  /** Reads the provider message, code, and request ID from an error body. Never spreads the body. */
+  errorDetail(body: unknown): ProviderErrorDetail;
+  /**
+   * REST only: reads a failure that the provider reports inside a successful (2xx) response body, such as
+   * { ok: false, error }. A failure maps like an HTTP error body: Provider.errorCodes, then the status mapping. Raw api
+   * request output prints the body with request secrets scrubbed before reporting the failure.
+   */
+  bodyFailure?(body: unknown): ProviderErrorDetail | undefined;
+  /**
+   * Reads provider notices that every response can carry, such as warning and response_metadata.warnings, into
+   * meta.provider. Applies to every shaped response, paginated reads included, and never to raw api request output.
+   * Human output also prints the string values of the keys warning and warnings to stderr, one Warning: line each.
+   */
+  responseMeta?(body: unknown): Record<string, unknown> | undefined;
+  /**
+   * Profiles store an access level, read or write, required when a profile is created. With read, every remote
+   * mutation, api request with a mutating method included, fails PERMISSION_DENIED before anything is sent. The core
+   * adds the profile key, the --access option, the prompt, the help text, and the guard.
+   */
+  accessLevels?: true;
+  /**
+   * Maps provider error codes (HTTP error bodies and GraphQL errors) to error codes. Consulted before the status
+   * mapping. An unmapped code falls back to the status mapping, then PROVIDER_ERROR.
+   */
+  errorCodes?: Readonly<Record<string, ErrorCode>>;
+  /** Default pagination style. A command can override it with PaginationSpec.style. Required when a command declares pagination without one. */
+  pagination?: Pagination;
+  /**
+   * One check, or several. With several, `auth verify` runs every check whose credential the profile stores, and the
+   * credential option runs one.
+   */
+  verify: VerifyCheck | VerifyCheck[];
+  api: RawApi;
+  groups: GroupSpec[];
+  commands: ResourceCommand[];
+  /** Commands that print built-in reference data and send no request. */
+  localCommands?: LocalCommand[];
+}
+
+export interface SecretField {
+  /** camelCase profile key, such as "apiKey". */
+  key: string;
+  /** Lowercase noun for help and errors, such as "API key". */
+  label: string;
+  /** Returns the failed constraint, such as "contain only visible ASCII characters without spaces". */
+  validate(value: string): string | undefined;
+  /** False for a credential part that is not secret, such as an email: plain option, plain prompt, never redacted. Default: true. */
+  secret?: boolean;
+  /** Option value placeholder of a non-secret field. Default: the key in upper snake case. */
+  placeholder?: string;
+  /** Example value of a non-secret field for help examples. Default: the placeholder. */
+  example?: string;
+}
+
+/** Credential fields that travel together. */
+export interface CredentialSet {
+  /** Lowercase kebab-case name, shown as a choice of the credential option. */
+  name: string;
+  /** Field keys. Sets partition the credential fields: each field belongs to exactly one set. */
+  fields: string[];
+}
+
+export interface EndpointField {
+  /** camelCase key, such as "apiVersion". Names the profile key and --api-version. */
+  key: string;
+  /** Lowercase noun for help and errors, such as "API version". */
+  label: string;
+  /** Option value placeholder. Default: the key in upper snake case. */
+  placeholder?: string;
+  /** Example value for help text. Default: default, then the first choice, then the placeholder. */
+  example?: string;
+  /** Applies when the profile does not set the field. */
+  default?: string;
+  /** Allowed values. Replaces validate. */
+  choices?: string[];
+  /** Returns the failed constraint, such as "match YYYY-MM". */
+  validate?(value: string): string | undefined;
+  /**
+   * Makes the field choose the base URL, for example a subdomain or region. Within a profile a stored base URL
+   * wins over the field. At most one field can do this.
+   */
+  baseUrl?(value: string): string;
+}
+
+export interface BaseUrlRule {
+  /** Omit when the provider has no shared host. Resolution then fails CONFIGURATION_ERROR until the profile sets a base URL. */
+  default?: string;
+  /** Example for help and hints. Required when there is no default and no field derives the base URL. */
+  example?: string;
+  /**
+   * True only when the base URL may carry a path. Without joinPath, the base URL is the complete endpoint, such as a
+   * GraphQL URL, and requests go to it unchanged without the request path.
+   */
+  allowPath: boolean;
+  /**
+   * With allowPath: the base URL path is a prefix, and every request path is appended to it, so https://api.example.com/v1
+   * and /resources send to https://api.example.com/v1/resources.
+   */
+  joinPath?: true;
+}
+
+export interface ProviderErrorDetail {
+  message?: string;
+  code?: string | number;
+  requestId?: string;
+}
+
+export interface PageRequest {
+  size: number;
+  cursor: string | null;
+}
+
+/** The part of a collection request that a page can change. The core passes a copy of the body for every page. */
+export interface PagedRequest {
+  /** Complete page URL. query is this URL's searchParams. */
+  url: URL;
+  query: URLSearchParams;
+  body: unknown;
+}
+
+export interface PageInfo {
+  nextCursor: string | null;
+  /** Overrides the has_more derived from nextCursor, for a read the provider caps with more results remaining. */
+  hasMore?: boolean;
+  /** Provider collection metadata not encoded by the cursor, kept under meta.provider. */
+  provider?: Record<string, unknown>;
+}
+
+/**
+ * A pagination style. Its members are function-typed properties, not methods, so the compiler holds an
+ * implementation to the parameter types the core passes: it narrows payload inside read instead of declaring it.
+ */
+export interface Pagination {
+  /** Treat cursors as absolute URLs on the initial request's origin. Default: the adapter applies the cursor. */
+  continuation?: "url";
+  /** Reads the fixed page size from a continuation URL. Required by boundary: "preserve-cursor-size". Undefined means invalid. */
+  cursorSize?: (url: URL) => number | undefined;
+  /** Writes the page size and cursor into the query or the body of a collection request. */
+  apply: (request: PagedRequest, page: PageRequest) => void;
+  /**
+   * Reads the continuation from a page, or returns undefined when the fields break the contract. payload is the
+   * object the collection was taken from (the array itself when the collection is the response root), or the select
+   * input when the command declares select. items are the page items. page is the request that produced them.
+   */
+  read: (payload: unknown, collectionKey: string | undefined, page: PageRequest, items: unknown[]) => PageInfo | undefined;
+  /** Validates a --cursor value while arguments are parsed. Returns the value or throws INVALID_ARGUMENT. */
+  checkCursor?: (value: string) => string;
+  /**
+   * Combines meta.provider of two pages during --all. Default: a key that holds an array on both pages concatenates
+   * them and drops a later item that matches an earlier one (objects with a string or number id by type, when they
+   * have one, and id; anything else by its JSON text); any other value takes the last page's.
+   */
+  mergeProvider?: (previous: Record<string, unknown>, next: Record<string, unknown>) => Record<string, unknown>;
+  /** The cursor is a counter (page number or offset): two pages with identical items fail INVALID_RESPONSE. */
+  detectRepeatedPages?: boolean;
+  /**
+   * The provider can return an empty page that still has a next cursor, because it filters after paging. Without it,
+   * such a page fails INVALID_RESPONSE. The repeated-cursor guard still applies.
+   */
+  allowEmptyPages?: boolean;
+}
+
+export interface VerifyCheck {
+  method: HttpMethod;
+  /** The request path. A function reads resolved endpoint fields, such as an API version. */
+  path: string | ((endpoint: Endpoint) => string);
+  query: [string, string][];
+  /** JSON request body, such as a GraphQL query. */
+  body?: unknown;
+  /** GraphQL root field the check reads. identity and validate then receive its value. */
+  field?: string;
+  /** Credential set the check uses. Required for every check when the provider declares credentialSets. */
+  credential?: string;
+  /** The check text in the output. Default: METHOD PATH?QUERY. */
+  label?: string;
+  /** Effects text for 'auth verify --help': what the check sends and what success proves. */
+  effect: string;
+  /** Throws INVALID_RESPONSE when the response does not have the expected shape. */
+  validate?(data: unknown): void;
+  /** Extracts the caller identity from the response, when the check returns one. helpers reads response headers. */
+  identity?(data: unknown, helpers: HookHelpers): unknown;
+}
+
+export interface RawApi {
+  methods: readonly HttpMethod[];
+  /**
+   * The provider serves one GraphQL endpoint (STYLE-API-1). api request then accepts POST /graphql only: any other
+   * PATH fails INVALID_ARGUMENT, and the core records the STYLE-API-1 exception in help. methods must be ["POST"],
+   * and a provider with protocol "graphql" must set it.
+   */
+  graphql?: true;
+  /** Validates the --file body and makes --file required. Throws INVALID_ARGUMENT. Every method must change state. */
+  bodyCheck?(body: unknown): void;
+  /** Adds redaction metadata for raw input. Receives a copy; only previewBody and secretValues affect the call. */
+  sensitiveInput?(request: {
+    method: HttpMethod;
+    path: string;
+    query: readonly (readonly [string, string])[];
+    body: unknown;
+  }): { previewBody?: unknown; secretValues?: string[] };
+  examples: string[];
+  exceptions?: Exception[];
+}
+
+/** What a command does with a response. Shared by single-request commands and the calls of a run hook. */
+export interface ResponseShape {
+  /** Key of the object that holds the collection array. The result is a collection. */
+  collectionKey?: string;
+  /** The selected response value is itself the collection array. The result is a collection. */
+  collection?: boolean;
+  /** Key that wraps the single resource. data is its value; a missing key is INVALID_RESPONSE. */
+  resourceKey?: string;
+  /**
+   * Keys of the object holding the data that move into meta.provider: totals, or side-loaded arrays that sit beside the
+   * collection. A paginated read merges them across --all pages with Pagination.mergeProvider, and keys that
+   * Pagination.read also returns take its value.
+   */
+  providerMeta?: readonly string[];
+  /**
+   * Chooses the result from the decoded body, or from the GraphQL data object. null and undefined mean no result.
+   * It replaces the GraphQL root field and cannot be combined with collectionKey or resourceKey. Throw CliError to fail.
+   */
+  select?(payload: unknown, context: Context): unknown;
+  /**
+   * Runs after the response is validated and shaped, and returns the data to print. Throw CliError, for example
+   * stepsFailure, to report a partial result. Single-response commands only: a paginated command cannot declare it.
+   * The core scrubs a CliError thrown from select, settle, or Step.validate before it prints, so helpers.scrub is
+   * for text a hook puts into data.
+   */
+  settle?(result: { data: unknown; payload: unknown }, context: Context, helpers: HookHelpers): unknown;
+}
+
+/** What a hook that reads a response may use besides the response: the exchange and the request that produced it. */
+export interface HookHelpers {
+  /**
+   * Scrubs the request's secrets from provider text, collapses whitespace and control characters, and bounds the
+   * length, the way the core cleans a provider error message. Returns "" for text that is empty after cleaning.
+   */
+  scrub(text: string): string;
+  /** HTTP status and request ID of the response, ready for stepsFailure's provider option. */
+  provider: ProviderInfo;
+  /** The request the response answers, with the body as it was sent. */
+  request: RequestSpec;
+  /** A response header, with the request's secrets scrubbed, or undefined when the response does not carry it. */
+  header(name: string): string | undefined;
+  /** Decoded body kind, classified before header redaction. An empty body is empty regardless of Content-Type. */
+  responseType: "empty" | "json" | "text";
+}
+
+export interface ResourceCommandBase {
+  path: string[];
+  summary: string;
+  arguments: ArgumentSpec[];
+  /** Command options only. The core appends pagination options, --yes, and --dry-run from pagination and effects. */
+  options: OptionSpec[];
+  effects: Effects;
+  output: string;
+  /** Credential set the command needs. Required when the provider declares credentialSets, otherwise not allowed. */
+  credential?: string;
+  /** Error codes beyond the shape-derived ones that the command can fail with, for the help Failures section. */
+  failures?: ErrorCode[];
+  examples: string[];
+  exceptions?: Exception[];
+  /** Validates input once, before profile or access resolution. Its result is passed to request or run. */
+  prepare?(context: Context): unknown;
+}
+
+/** A command that sends one request. */
+export interface RequestCommand extends ResourceCommandBase, ResponseShape {
+  method: HttpMethod;
+  pagination?: PaginationSpec;
+  /** Pagination help for an unpaginated collection: whether the provider returns the full list or caps it. */
+  unpaginated?: string;
+  /** An empty result (null or an empty array) fails NOT_FOUND. */
+  emptyIsNotFound?: boolean;
+  request(context: Context, endpoint: Endpoint, prepared?: unknown): RequestSpec;
+  run?: never;
+}
+
+/** A command that sends several requests, or reads before it writes, through the client. */
+export interface RunCommand extends ResourceCommandBase {
+  pagination?: PaginationSpec;
+  unpaginated?: string;
+  /** Sends requests through the client and returns the data to print, or undefined after a dry run. */
+  run(context: Context, client: Client, prepared?: unknown): Promise<RunResult | undefined>;
+  request?: never;
+  method?: never;
+}
+
+export type ResourceCommand = RequestCommand | RunCommand;
+
+export interface RunResult {
+  data: unknown;
+  meta?: Record<string, unknown>;
+}
+
+/** A command that prints built-in reference data and sends no request. */
+export interface LocalCommand {
+  path: string[];
+  summary: string;
+  arguments: ArgumentSpec[];
+  options: OptionSpec[];
+  output: string;
+  /** Pagination help for a collection result, such as "Not paginated. The command lists every entry." */
+  unpaginated?: string;
+  examples: string[];
+  exceptions?: Exception[];
+  run(context: Context): RunResult | Promise<RunResult>;
+}
+
+export interface RequestSpec {
+  path: string;
+  /** Reads only: follow at most three redirects on the original origin, within the attempt's timeout. Default: reject redirects. */
+  redirects?: "same-origin";
+  /** Non-secret Accept header, also shown in previews. Default: application/json. */
+  accept?: "application/json" | "text/plain" | "text/x-diff";
+  query?: [string, string][];
+  body?: unknown;
+  /** Body shown in dry runs, when the real body carries values that must not print. */
+  previewBody?: unknown;
+  /** Effect sentence for the confirmation prompt, with identifiers filled in. */
+  effect?: string;
+  /** GraphQL root field this request reads. The response value of the field becomes the result. */
+  field?: string;
+  /** Values in the request that are sensitive but not under a sensitive key. Errors scrub them, and previewBody should hide them. */
+  secretValues?: string[];
+}

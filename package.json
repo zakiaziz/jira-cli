@@ -1,0 +1,21 @@
+{
+  "name": "@zakiaziz/jira-cli",
+  "version": "0.1.0",
+  "description": "Command-line interface for the Jira Cloud API.",
+  "type": "module",
+  "bin": { "jira": "./dist/cli.js" },
+  "files": ["dist", "README.md", "LICENSE", "docs"],
+  "scripts": {
+    "build": "bun build src/cli.ts --target=node --outfile dist/cli.js",
+    "check": "bun node_modules/typescript/bin/tsc --noEmit",
+    "prepack": "bun run build",
+    "dev": "bun --watch src/cli.ts"
+  },
+  "engines": { "node": ">=22" },
+  "packageManager": "bun@1.3.11",
+  "keywords": ["cli", "jira"],
+  "license": "MIT",
+  "repository": { "type": "git", "url": "git+https://github.com/zakiaziz/jira-cli.git" },
+  "publishConfig": { "access": "public" },
+  "devDependencies": { "@types/node": "^24", "typescript": "^5.8" }
+}
